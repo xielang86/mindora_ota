@@ -1,0 +1,24 @@
+[Unit]
+Description=OTA server (Gunicorn)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/server/ota-server
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/root/server/ota-server/.venv/bin/gunicorn --bind 0.0.0.0:4242 --workers 2 --threads 4 --timeout 120 --access-logfile - --error-logfile - server:app
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
