@@ -7,16 +7,18 @@ After=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/root/server/ota-server
+WorkingDirectory=/root/server/ota_server
 Environment=PYTHONUNBUFFERED=1
+Environment=OTA_LOG_DIR=/var/log/ota-server
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/root/server/ota-server/.venv/bin/gunicorn --bind 0.0.0.0:4242 --workers 2 --threads 4 --timeout 120 --access-logfile - --error-logfile - server:app
+ExecStart=/root/server/ota_server/.venv/bin/gunicorn --bind 0.0.0.0:4242 --workers 2 --threads 4 --timeout 120 --config /root/server/ota_server/gunicorn.conf.py server:app
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 UMask=0027
 NoNewPrivileges=true
 PrivateTmp=true
+ReadWritePaths=/var/log/ota-server
 ProtectSystem=strict
 ProtectHome=read-only
 

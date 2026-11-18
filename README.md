@@ -8,14 +8,14 @@ Gunicorn 导入 `server:app` 提供服务，不执行 `server.py` 中的 `app.ru
 
 ## 新机器部署
 
-将整个项目复制到服务器的 `/root/server/ota-server`，然后执行：
+将整个项目复制到服务器的 `/root/server/ota_server`，然后执行：
 
 ```bash
-cd /root/server/ota-server
+cd /root/server/ota_server
 sudo bash deploy.sh --with-data
 ```
 
-`--with-data` 将 `ota/` 复制到 `/root/server/ota-server/ota/`，覆盖同名文件，保留其他已有文件。
+`--with-data` 将 `ota/` 复制到 `/root/server/ota_server/ota/`，覆盖同名文件，保留其他已有文件。
 从其他目录部署时，符号链接会展开为真实文件；在安装目录内执行时保留已有链接。请确保 `ota/resources` 指向的目录存在且可读。
 复制包含版本元数据及其引用的所有固件、资源文件，以免客户端下载失败。
 更新已有机器时，应在无下载流量的维护窗口复制数据，避免元数据与固件不一致。
@@ -24,14 +24,14 @@ sudo bash deploy.sh --with-data
 
 ```bash
 sudo bash deploy.sh
-# 将完整 OTA 数据放入 /root/server/ota-server/ota/ 后赋予服务读取权限：
-sudo chown -R root:root /root/server/ota-server/ota
-sudo chmod -R u+rwX,g+rX,o-rwx /root/server/ota-server/ota
+# 将完整 OTA 数据放入 /root/server/ota_server/ota/ 后赋予服务读取权限：
+sudo chown -R root:root /root/server/ota_server/ota
+sudo chmod -R u+rwX,g+rX,o-rwx /root/server/ota_server/ota
 ```
 
 不带参数会保留已有 OTA 数据；没有 `version.json` 时，健康检查正常，但 `/ota/check` 返回 503。
-由于项目位于 `/root` 下，服务使用 `root` 用户运行；systemd 将系统和 home 目录设为只读。应用位于 `/root/server/ota-server`，
-虚拟环境位于 `/root/server/ota-server/.venv`，单元文件位于 `/etc/systemd/system/ota-server.service`。
+由于项目位于 `/root` 下，服务使用 `root` 用户运行；systemd 将系统和 home 目录设为只读。应用位于 `/root/server/ota_server`，
+虚拟环境位于 `/root/server/ota_server/.venv`，单元文件位于 `/etc/systemd/system/ota-server.service`。
 部署脚本可重复运行，成功后自动启动服务并设置开机启动。
 
 ## 管理与验证
@@ -60,7 +60,7 @@ sudo systemctl restart ota-server
 `ota/resources/manifest.json`。资源新增、修改、删除时，递增独立资源版本并重新生成清单：
 
 ```bash
-cd /root/server/ota-server/ota
+cd /root/server/ota_server/ota
 python3 generate.py ./resources 1.3.3
 # 已预置签名密钥的设备需要签名清单：
 # python3 generate.py ./resources 1.3.3 --sign-key-file /path/to/ota_sign.key
@@ -73,6 +73,47 @@ python3 generate.py ./resources 1.3.3
 
 ## OTA 检查日志
 
-更新服务代码后重启 `ota-server`，通过 `journalctl -u ota-server -f` 查看 `OTA` JSON 日志。
-日志记录检查请求的连接 IP、序列号、当前版本及提供版本；未发送的 MAC 等字段为空。
+Gunicorn 请求日志位于配置日志目录的 `access.log`，应用异常位于 `error.log`。
+只有应用实现对应上报/日志逻辑时，才能记录设备序列号、MAC、版本及更新结果；普通访问日志无法证明安装成功。
 具体客户端差异与成功回执限制见 [OTA_CLIENT_COMPARISON.md](OTA_CLIENT_COMPARISON.md)。
+
+## Gunicorn 日志落盘与自动清理
+
+部署默认路径已统一为 `/root/server/ota_server`。部署会安装独立的日志轮转 timer，
+不依赖 Gunicorn worker 执行清理。配置示例（root 执行）：
+
+```bash
+INSTALL_DIR=/root/server/ota_server \
+LOG_DIR=/var/log/ota-server \
+LOG_RETENTION=14 \
+LOG_MAX_SIZE=50M bash deploy.sh
+```
+
+参数在部署时写入 systemd 和 logrotate 配置；再次部署时应传入相同的自定义参数，
+省略参数将恢复默认值。不带 `--with-data` 不会从源目录覆盖 OTA 数据。
+
+- `access.log`：请求、状态码、返回字节数、请求耗时、连接 IP 和 Nginx 提供的 IP。
+- `error.log`：Gunicorn 启停、异常及被捕获的应用 stdout/stderr。
+- 默认每天轮转；独立 timer 每小时检查，超过 50 MB 时也会轮转。
+- 每个文件保留 14 份归档，超过后自动删除；不是严格保留 14 天。
+- 历史日志压缩，最近一次归档延迟压缩，避免进程切换文件时影响写入。
+- 轮转采用重命名并向 Gunicorn master 发送 USR1，重新打开日志，不使用 copytruncate。
+- 50 MB 是检查时的轮转阈值，不是磁盘硬上限；高流量时文件可在两次检查间超过阈值。
+
+```bash
+sudo tail -F /var/log/ota-server/access.log /var/log/ota-server/error.log
+sudo systemctl status ota-server-logrotate.timer
+sudo journalctl -u ota-server-logrotate.service -n 30 --no-pager
+# 只检查配置，不执行轮转：
+sudo logrotate --debug --state /var/lib/ota-server/logrotate.status /etc/ota-server/logrotate.conf
+# 手动执行一次轮转（用于验证）：
+sudo logrotate --force --state /var/lib/ota-server/logrotate.status /etc/ota-server/logrotate.conf
+```
+
+日志目录权限为 0750，新日志文件权限为 0640。systemd 只为配置的日志目录开放写权限。
+若后续修改目录，重新部署以同时更新写权限、Gunicorn 配置和轮转路径，不要只改环境变量。
+不要将日志放入公开下载的 `ota/` 目录。Nginx 自身日志仍由 Nginx 的轮转配置管理。
+应用运行日志落盘后，`journalctl -u ota-server` 主要用于服务生命周期和启动失败诊断。
+`client` 字段来自请求头，仅用于诊断；Nginx 需覆盖 X-Real-IP，且公网应禁止直连 4242。
+
+仅修改 `server.py` 的服务不需要替换应用代码；本次日志功能由 `gunicorn.conf.py`、service 和部署脚本提供。
