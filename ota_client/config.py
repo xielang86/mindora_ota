@@ -1,5 +1,12 @@
-OTA_SERVER = "https://api.mindora316.com/ota/version.json"
-# OTA_SERVER = "http://192.168.0.18:8000/ota/version.json"
+from config.config import Config
+
+OTA_INFO_URL = f"{Config.API_BASE_URL}/ota/check"
+# Production defaults shared by every release. Test devices prepend LAN URLs
+# through MINDORA_OTA_CHECK_URLS (a JSON array in the service environment).
+OTA_CHECK_URLS = [
+    "https://ota.mindora316.com/ota/check",
+    OTA_INFO_URL,
+]
 
 DOWNLOAD_DIR = "/home/rpdzkj/update/download"
 
@@ -11,12 +18,7 @@ RESOURCE_GUI_DIR = "/home/rpdzkj/resources/resources_gui"
 
 CONFIG_DIR = "/home/rpdzkj/config.json"
 
+# 用户数据目录（auth.json / user.json）：版本外存储，OTA 切版本后授权态与画像缓存不丢
+USER_DATA_DIR = "/home/rpdzkj/user_data"
+
 CURRENT_LINK = "/home/rpdzkj/mindora"
-
-# 更新状态文件：记录 pending 更新与上一个 release，
-# 供 boot 健康检查脚本（mindora 仓库，超出本目录）判断是否回滚
-UPDATE_STATE_FILE = "/home/rpdzkj/update/state.json"
-
-# 出厂预置的 OTA 签名密钥（HMAC-SHA256）。
-# 文件存在则 version.json / manifest.json 强制验签；不存在则跳过（兼容旧设备）
-SIGN_KEY_FILE = "/home/rpdzkj/ota_sign.key"

@@ -1,0 +1,9 @@
+[Unit]
+Description=Check OTA server log rotation hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

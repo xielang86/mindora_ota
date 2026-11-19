@@ -43,7 +43,7 @@ fi
 install -d -m 0755 "$INSTALL_DIR"
 # Avoid copying files onto themselves when rerunning from the installation.
 if [[ "$SOURCE_DIR" != "$INSTALL_DIR" ]]; then
-  install -m 0644 "$SOURCE_DIR/server.py" "$SOURCE_DIR/requirements.txt" "$SOURCE_DIR/gunicorn.conf.py" "$INSTALL_DIR/"
+  install -m 0644 "$SOURCE_DIR/server.py" "$SOURCE_DIR/requirements.txt" "$SOURCE_DIR/gunicorn.conf.py" "$SOURCE_DIR/ota_reports.py" "$INSTALL_DIR/"
 fi
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
@@ -78,6 +78,17 @@ EOF_ROTATE
 chmod 0640 /etc/ota-server/logrotate.conf
 install -m 0644 "$SOURCE_DIR/deploy/ota-server-logrotate.service" "$SOURCE_DIR/deploy/ota-server-logrotate.timer" /etc/systemd/system/
 /usr/sbin/logrotate --debug --state /var/lib/ota-server/logrotate.status /etc/ota-server/logrotate.conf
+install -d -m 0755 /etc/default
+if [[ ! -f /etc/default/ota-server ]]; then
+  (umask 077; cat > /etc/default/ota-server <<'EOF_REPORT'
+# Upload endpoints return 503 until a token is provisioned. Downloads remain public.
+OTA_REPORT_TOKEN=
+OTA_STATE_DIR=/var/lib/ota-server
+OTA_REPORT_RETENTION_DAYS=30
+OTA_REPORT_MAX_ROWS=10000
+EOF_REPORT
+  )
+fi
 systemctl daemon-reload
 systemctl enable --now ota-server-logrotate.timer
 systemctl enable ota-server.service

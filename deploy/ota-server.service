@@ -8,6 +8,9 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/root/server/ota_server
+EnvironmentFile=-/etc/default/ota-server
+StateDirectory=ota-server
+StateDirectoryMode=0750
 Environment=PYTHONUNBUFFERED=1
 Environment=OTA_LOG_DIR=/var/log/ota-server
 Environment=PYTHONDONTWRITEBYTECODE=1

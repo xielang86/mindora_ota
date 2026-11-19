@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotate OTA server logs
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate --state /var/lib/ota-server/logrotate.status /etc/ota-server/logrotate.conf

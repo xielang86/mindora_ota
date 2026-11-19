@@ -4,7 +4,10 @@ import logging
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 
+from ota_reports import reports
+
 app = Flask(__name__)
+app.register_blueprint(reports)
 app.logger.setLevel(logging.INFO)
 BASE = Path(__file__).resolve().parent / 'ota'
 

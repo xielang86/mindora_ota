@@ -117,3 +117,19 @@ sudo logrotate --force --state /var/lib/ota-server/logrotate.status /etc/ota-ser
 `client` 字段来自请求头，仅用于诊断；Nginx 需覆盖 X-Real-IP，且公网应禁止直连 4242。
 
 仅修改 `server.py` 的服务不需要替换应用代码；本次日志功能由 `gunicorn.conf.py`、service 和部署脚本提供。
+
+## 更新上报与新版客户端
+
+新增独立的 `POST /ota/report`、`POST /ota/health`、`POST /ota/logs`，不更改旧下载协议。
+部署脚本保留已有 `/etc/default/ota-server`，首次生成时 token 为空；配置 token 后重启才启用上报。
+SQLite 数据存放在 `/var/lib/ota-server`，由 systemd StateDirectory 提供写权限。
+设备端稳定版的状态锁、多源选择及原启动方式部署步骤见 [client_update/README.md](client_update/README.md)。
+原 `ota_client/` 是旧示例，实际改动针对相邻 mindora 项目；不要混用两套接口。
+
+当前客户端稳定版不启用外置健康确认/自动回滚，不需要安装 OTA supervisor；详见 client_update/README.md。
+
+## 当前发布迭代：仅多源与防重复更新
+
+以 mindora 分支为基线的实际补丁位于 client_minimal/，已同步到相邻 mindora 项目。
+不使用前面 client_update/ 的健康确认/启动守护方案。保持原四个进程及启动方式，无新增安装依赖。
+设备配置及行为说明见相邻项目 docs/ota-multisource.md；补丁文件位于 client_minimal/mindora/。
