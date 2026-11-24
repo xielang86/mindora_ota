@@ -59,12 +59,12 @@ def check_urls(default=''):
     return result
 
 
-def get_info(url, serial, version):
+def get_info(url, serial, version, device_headers=None):
     device = {'serial_number': serial, 'current_version': version}
     if urlsplit(url).path.endswith('.json'):
-        r = requests.get(url, params=device, timeout=(2, 10))
+        r = requests.get(url, params=device, headers=device_headers, timeout=(2, 10))
     else:
-        r = requests.post(url, json=device, timeout=(2, 10))
+        r = requests.post(url, json=device, headers=device_headers, timeout=(2, 10))
     with r:
         r.raise_for_status()
         data = r.json()
@@ -75,12 +75,12 @@ def get_info(url, serial, version):
     return data
 
 
-def candidates(info):
+def candidates(info, device_headers=None):
     result = []
     urls = check_urls(info.get('_check_url', ''))
     for source in filter(None, urls):
         try:
-            data = get_info(source, '', info['version'])
+            data = get_info(source, '', info['version'], device_headers)
             if (data['version'], data['sha256'].lower(), int(data['size'])) != (
                     info['version'], info['sha256'].lower(), int(info['size'])):
                 logging.warning('skip mirror with different target: %s', source)
@@ -93,12 +93,13 @@ def candidates(info):
     return list(dict.fromkeys(result))
 
 
-def probe(url, size, cancelled=lambda: None):
+def probe(url, size, cancelled=lambda: None, device_headers=None):
     """At most 64 KiB, short read timeout; size must match pinned metadata."""
     start = time.monotonic()
     received = 0
-    with requests.get(url, headers={'Range': 'bytes=0-65535', 'Accept-Encoding': 'identity'},
-                      stream=True, timeout=(2, 2)) as r:
+    headers = dict(device_headers or {}, Range='bytes=0-65535')
+    headers['Accept-Encoding'] = 'identity'
+    with requests.get(url, headers=headers, stream=True, timeout=(2, 2)) as r:
         r.raise_for_status()
         if r.headers.get('Content-Encoding', 'identity') not in ('identity', ''):
             raise RuntimeError('compressed download cannot be ranged safely')
@@ -118,14 +119,14 @@ def probe(url, size, cancelled=lambda: None):
     return received / max(0.001, time.monotonic()-start)
 
 
-def resource_mirrors(info, manifest_bytes):
+def resource_mirrors(info, manifest_bytes, device_headers=None):
     import hashlib
     pinned = hashlib.sha256(manifest_bytes).digest()
     urls = [info['resources_url']]
     for endpoint in filter(None, check_urls(info.get('_check_url', ''))):
         try:
-            other = get_info(endpoint, '', info['version'])
-            with requests.get(other['resources_manifest_url'], timeout=(2, 5)) as r:
+            other = get_info(endpoint, '', info['version'], device_headers)
+            with requests.get(other['resources_manifest_url'], headers=device_headers, timeout=(2, 5)) as r:
                 r.raise_for_status()
                 if hashlib.sha256(r.content).digest() == pinned:
                     urls.append(other['resources_url'])
@@ -134,7 +135,7 @@ def resource_mirrors(info, manifest_bytes):
     return list(dict.fromkeys(urls))
 
 
-def fetch_manifest(info):
+def fetch_manifest(info, device_headers=None):
     """Fallback a missing manifest only when metadata pins its SHA256 explicitly."""
     import hashlib
     expected = info.get('resources_manifest_sha256')
@@ -142,7 +143,7 @@ def fetch_manifest(info):
     if expected:
         for endpoint in filter(None, check_urls(info.get('_check_url', ''))):
             try:
-                mirror = get_info(endpoint, '', info['version'])
+                mirror = get_info(endpoint, '', info['version'], device_headers)
                 if (mirror['version'], mirror['sha256'].lower(), int(mirror['size'])) == (
                         info['version'], info['sha256'].lower(), int(info['size'])):
                     choices.append((mirror['resources_manifest_url'], mirror['resources_url']))
@@ -151,7 +152,7 @@ def fetch_manifest(info):
     last = RuntimeError('resource manifest unavailable')
     for url, base in dict.fromkeys(choices):
         try:
-            with requests.get(url, timeout=(3, 15)) as response:
+            with requests.get(url, headers=device_headers, timeout=(3, 15)) as response:
                 response.raise_for_status()
                 content = response.content
             if expected and hashlib.sha256(content).hexdigest().lower() != expected.lower():

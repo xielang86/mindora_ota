@@ -14,7 +14,7 @@ StateDirectoryMode=0750
 Environment=PYTHONUNBUFFERED=1
 Environment=OTA_LOG_DIR=/var/log/ota-server
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/root/server/ota_server/.venv/bin/gunicorn --bind 0.0.0.0:4242 --workers 2 --threads 4 --timeout 120 --config /root/server/ota_server/gunicorn.conf.py server:app
+ExecStart=/root/server/ota_server/.venv/bin/gunicorn --bind 0.0.0.0:4242 --workers 2 --threads 4 --timeout 120 --config /root/server/ota_server/gunicorn.conf.py ota_server:app
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

@@ -2,7 +2,7 @@
 import json
 import logging
 from pathlib import Path
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_from_directory
 
 from ota_reports import reports
 
@@ -23,6 +23,8 @@ def check():
     # selection is implemented by this all-devices gray origin.
     try:
         data = json.loads((BASE / 'version.json').read_text())
+        if isinstance(data, dict):
+            g.offered_version = data.get('version')
         return jsonify(data)
     except (OSError, ValueError):
         app.logger.exception('Cannot read release metadata')
@@ -39,7 +41,9 @@ def files(filename):
 
 @app.after_request
 def headers(response):
-    if request.path == '/ota/check' or request.path == '/ota/version.json':
+    is_check = request.path in ('/ota/check', '/ota/version.json')
+    is_download = request.endpoint == 'files' and request.method in ('GET', 'HEAD')
+    if is_check or is_download:
         payload = request.get_json(silent=True) if request.method == 'POST' else request.args
         if not hasattr(payload, 'get'):
             payload = {}
@@ -47,25 +51,31 @@ def headers(response):
         peer_ip = request.remote_addr
         client_ip = (request.headers.get('X-Real-IP') or peer_ip
                      if peer_ip in ('127.0.0.1', '::1') else peer_ip)
-        target_version = None
-        if response.status_code == 200 and request.method != 'HEAD':
-            try:
-                target_version = json.loads((BASE / 'version.json').read_text()).get('version')
-            except (OSError, ValueError, AttributeError):
-                pass
         event = {
-            'event': 'ota_check',
+            'event': 'ota_check' if is_check else 'ota_download',
             'client_ip': client_ip,
             'peer_ip': peer_ip,
-            'serial_number': str(payload.get('serial_number') or '')[:128],
-            'mac': str(payload.get('mac') or payload.get('mac_address') or '')[:64],
-            'current_version': str(payload.get('current_version') or '')[:64],
-            'offered_version': target_version,
+            'serial_number': str(request.headers.get('X-OTA-SN') or payload.get('serial_number') or '')[:128],
+            'mac': str(request.headers.get('X-OTA-MAC') or payload.get('mac') or payload.get('mac_address') or '')[:64],
+            'current_version': str(request.headers.get('X-OTA-Version') or payload.get('current_version') or '')[:64],
+            'method': request.method,
+            'path': request.path,
             'status': response.status_code,
         }
+        if is_check:
+            target_version = g.get('offered_version')
+            if request.path == '/ota/version.json' and request.method == 'GET' and response.status_code == 200:
+                try:
+                    target_version = json.loads((BASE / 'version.json').read_text()).get('version')
+                except (OSError, ValueError, AttributeError):
+                    pass
+            event['offered_version'] = target_version
+        else:
+            event['range'] = request.headers.get('Range', '')[:128]
+            event['content_length'] = response.content_length
         # JSON encoding keeps untrusted device fields on a single log line.
         app.logger.info('OTA %s', json.dumps(event, ensure_ascii=True))
-    response.headers['Content-Encoding'] = 'identity' 
+    response.headers['Content-Encoding'] = 'identity'
     if request.path.endswith('.json') or request.path == '/ota/check':
         response.headers['Cache-Control'] = 'no-store'
     return response

@@ -151,12 +151,12 @@ def _request_json(method, url, **kwargs):
     return False, _error_text(code)
 
 
-def check_version(serial_number, current_version):
+def check_version(serial_number, current_version, device_headers=None):
     from ota.sources import check_urls, get_info
     urls = check_urls(OTA_INFO_URL)
     if urls == [OTA_INFO_URL]:
         # Explicit single-source deployments retain the old error-code contract.
-        success, result = _request_json('POST', OTA_INFO_URL, json={
+        success, result = _request_json('POST', OTA_INFO_URL, headers=device_headers, json={
             'serial_number': serial_number, 'current_version': current_version})
         if success and isinstance(result, dict):
             result['_check_url'] = OTA_INFO_URL
@@ -166,7 +166,7 @@ def check_version(serial_number, current_version):
     first_valid = None
     for url in urls:
         try:
-            info = get_info(url, serial_number, current_version)
+            info = get_info(url, serial_number, current_version, device_headers)
             try:
                 newer = Version(info['version']) > Version(current_version)
             except (InvalidVersion, TypeError) as e:
@@ -211,13 +211,14 @@ class _RequestThread(QThread):
 
 
 class VersionCheckThread(_RequestThread):
-    def __init__(self, serial_number, current_version, parent=None):
+    def __init__(self, serial_number, current_version, parent=None, *, device_headers=None):
         super().__init__(parent)
         self.serial_number = serial_number
         self.current_version = current_version
+        self.device_headers = device_headers
 
     def _do_request(self):
-        return check_version(self.serial_number, self.current_version)
+        return check_version(self.serial_number, self.current_version, self.device_headers)
 
 
 class ManifestCheckThread(_RequestThread):

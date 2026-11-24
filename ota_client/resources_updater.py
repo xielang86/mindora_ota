@@ -29,7 +29,8 @@ class ResourceUpdater(QThread):
 
     def __init__(self, resources_url, download_list, delete_list,
                  resource_root='/home/rpdzkj/resources', retry=3,
-                 manifest_hash=None, parent=None, manifest_bytes=None, resource_urls=None):
+                 manifest_hash=None, parent=None, manifest_bytes=None, resource_urls=None,
+                 *, device_headers=None):
         """
         download_list 每项: {'path': ..., 'md5': ...}
             可选 'sha256'（优先于 md5）、'size'（字节，用于磁盘空间预检）
@@ -39,6 +40,7 @@ class ResourceUpdater(QThread):
 
         self.resources_url = resources_url.rstrip('/')
         self.resource_urls = resource_urls or [self.resources_url]
+        self.device_headers = device_headers
         self.download_list = download_list
         self.delete_list = delete_list
         self.resource_root = os.path.realpath(resource_root)
@@ -234,6 +236,7 @@ class ResourceUpdater(QThread):
         total = len(self.download_list)
 
         with requests.Session() as session:
+            session.headers.update(self.device_headers or {})
             for idx, item in enumerate(self.download_list):
                 self._check_stop()
 

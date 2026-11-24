@@ -43,7 +43,7 @@ fi
 install -d -m 0755 "$INSTALL_DIR"
 # Avoid copying files onto themselves when rerunning from the installation.
 if [[ "$SOURCE_DIR" != "$INSTALL_DIR" ]]; then
-  install -m 0644 "$SOURCE_DIR/server.py" "$SOURCE_DIR/requirements.txt" "$SOURCE_DIR/gunicorn.conf.py" "$SOURCE_DIR/ota_reports.py" "$INSTALL_DIR/"
+  install -m 0644 "$SOURCE_DIR/ota_server.py" "$SOURCE_DIR/requirements.txt" "$SOURCE_DIR/gunicorn.conf.py" "$SOURCE_DIR/ota_reports.py" "$INSTALL_DIR/"
 fi
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"

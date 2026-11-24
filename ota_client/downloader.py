@@ -56,9 +56,10 @@ class DownloadThread(QThread):
     UNAVAILABLE_TRIES = 2
     DISK_RESERVE = 50 * 1024 * 1024
 
-    def __init__(self, url, save_path, retry=5, sha256=None, parent=None, info=None):
+    def __init__(self, url, save_path, retry=5, sha256=None, parent=None, info=None, *, device_headers=None):
         super().__init__(parent)
         self.info = info
+        self.device_headers = device_headers
         self.selected_source = url
         self.url = url
         self.save_path = os.path.abspath(save_path)
@@ -91,14 +92,14 @@ class DownloadThread(QThread):
             from ota.sources import settings
             multi_source = bool(self.info and (len(check_urls(self.info.get('_check_url', ''))) > 1
                                                or self.info.get('download_urls')))
-            urls = candidates(self.info) if multi_source else [self.url]
+            urls = candidates(self.info, self.device_headers) if multi_source else [self.url]
             usable, slow = [], []
             if multi_source:
                 threshold = float(settings().get('min_bytes_per_second', 32768))
                 for url in urls:
                     self._check_stop()
                     try:
-                        speed = probe(url, int(self.info['size']), self._check_stop)
+                        speed = probe(url, int(self.info['size']), self._check_stop, self.device_headers)
                         (usable if speed >= threshold else slow).append(url)
                         logger.info('OTA probe %s: %.0f bytes/s', url, speed)
                     except DownloadCancelled:
@@ -229,7 +230,8 @@ class DownloadThread(QThread):
 
     def _download_once(self):
         pos = os.path.getsize(self.part_path) if os.path.exists(self.part_path) else 0
-        headers = {'Accept-Encoding': 'identity'}
+        headers = dict(self.device_headers or {})
+        headers['Accept-Encoding'] = 'identity'
         if pos:
             headers['Range'] = f'bytes={pos}-'
 

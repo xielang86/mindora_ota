@@ -1,8 +1,8 @@
 # OTA Server
 
-入口是 `server.py`，部署后由 systemd 管理 Gunicorn，监听 `0.0.0.0:4242`。
+入口是 `ota_server.py`，部署后由 systemd 管理 Gunicorn，监听 `0.0.0.0:4242`。
 脚本会创建 `.venv` 并安装 `requirements.txt` 中的 Flask 和 Gunicorn，无需单独安装 Gunicorn。
-Gunicorn 导入 `server:app` 提供服务，不执行 `server.py` 中的 `app.run()`。
+Gunicorn 导入 `ota_server:app` 提供服务。
 支持使用 apt-get（Ubuntu/Debian）、dnf 或 yum 的 Linux 系统，要求 systemd 正在运行。
 部署需要 root 权限，以及可访问系统软件源和 Python 包源的网络。
 
@@ -56,26 +56,42 @@ sudo systemctl restart ota-server
 
 ## 资源清单与代码版本分离
 
-`ota/version.json` 保存代码版本、代码包信息及资源地址；资源文件列表只保存在
-`ota/resources/manifest.json`。资源新增、修改、删除时，递增独立资源版本并重新生成清单：
+`ota/version.json` 保存代码版本、代码包信息及资源地址。每个资源版本在自己的目录下提供
+`manifest.json`。资源新增、修改、删除时，在发布机递增独立资源版本并重新生成清单：
 
 ```bash
-cd /root/server/ota_server/ota
-python3 generate.py ./resources 1.3.3
+python3 ota/generate.py /path/to/resources 1.3.5
 # 已预置签名密钥的设备需要签名清单：
-# python3 generate.py ./resources 1.3.3 --sign-key-file /path/to/ota_sign.key
+# python3 ota/generate.py /path/to/resources 1.3.5 --sign-key-file /path/to/ota_sign.key
+python3 publish_resources.py --source /path/to/resources --config ../mindora/deploy/online.json
 ```
 
-这里的版本号是资源版本，与代码版本独立。生成脚本只修改资源 manifest，不修改 version.json。
-只更新代码包时不需要重新生成 manifest。资源地址保持不变时，资源更新也无需修改 version.json。
-先上传完整资源，再发布与之匹配的 manifest；在线覆盖固定路径仍可能影响正在下载的设备，
-建议在维护窗口发布，或采用独立版本目录并保留旧资源。
+发布机和目标机需要 Python 3.11+ 和 rsync，SSH 目标复用代码发布配置中的 `ssh_host`、
+`remote_root` 和 `public_base_url`。目标机应已有代码发布元数据和可访问的 OTA 服务。
+脚本只同步清单列出的文件，验证文件大小和哈希后发布到 `ota/resource-releases/<资源版本>/`。
+首版可从旧 `ota/resources/` 在服务端复用未变文件的副本。后续版本从上一版硬链接复用未变文件，
+以 rsync 增量传输新内容。暂存目录和发布目录需在同一文件系统。
 
-## OTA 检查日志
+脚本验证公开资源清单后，与代码发布共用 `.publish.lock` 原子更新 `ota/version.json` 的资源字段。
+公开检查成功后默认保留最近三版，可用 `--keep` 增加保留数，为长时间离线或续传的设备延长窗口。
+现有旧版固定资源目录继续提供下载，已发布资源版本的文件需保持原样。
+发布单独的资源版本时，客户端的升级触发条件仍由设备上的代码版本逻辑决定。
 
-Gunicorn 请求日志位于配置日志目录的 `access.log`，应用异常位于 `error.log`。
-只有应用实现对应上报/日志逻辑时，才能记录设备序列号、MAC、版本及更新结果；普通访问日志无法证明安装成功。
-具体客户端差异与成功回执限制见 [OTA_CLIENT_COMPARISON.md](OTA_CLIENT_COMPARISON.md)。
+## OTA 设备日志
+
+客户端通过 `X-OTA-SN`、`X-OTA-MAC` 和 `X-OTA-Version` 请求头发送设备序列号、网卡 MAC 和运行版本。
+Gunicorn 的 `error.log` 收录 `OTA` 前缀的单行 JSON，事件 `ota_check` 对应版本检查，
+`ota_download` 对应安装包、资源和资源清单请求，包含 HTTP 状态、路径及请求的 Range。
+旧客户端可以继续下载，日志会使用它已有的检查字段，未提供的身份字段留空。
+下载事件表示服务处理过该请求，设备健康和安装结果通过独立上报接口记录。
+
+反向代理应将 `/ota/` 的检查与下载请求转发给 Gunicorn，并保留上述请求头。
+若由 Nginx 直接返回静态文件或缓存命中，需从代理侧记录设备请求头才能覆盖这些下载。
+
+```bash
+sudo rg -F '"serial_number": "DEVICE-SN"' /var/log/ota-server/error.log
+sudo tail -F /var/log/ota-server/error.log
+```
 
 ## Gunicorn 日志落盘与自动清理
 
@@ -93,7 +109,7 @@ LOG_MAX_SIZE=50M bash deploy.sh
 省略参数将恢复默认值。不带 `--with-data` 不会从源目录覆盖 OTA 数据。
 
 - `access.log`：请求、状态码、返回字节数、请求耗时、连接 IP 和 Nginx 提供的 IP。
-- `error.log`：Gunicorn 启停、异常及被捕获的应用 stdout/stderr。
+- `error.log`：Gunicorn 启停、异常及 OTA 设备事件。
 - 默认每天轮转；独立 timer 每小时检查，超过 50 MB 时也会轮转。
 - 每个文件保留 14 份归档，超过后自动删除；不是严格保留 14 天。
 - 历史日志压缩，最近一次归档延迟压缩，避免进程切换文件时影响写入。
