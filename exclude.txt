@@ -1,2 +1,4 @@
 ota/resources
 .git/
+__pycache__/
+./ota_client

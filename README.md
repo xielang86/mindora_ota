@@ -34,6 +34,22 @@ sudo chmod -R u+rwX,g+rX,o-rwx /root/server/ota_server/ota
 虚拟环境位于 `/root/server/ota_server/.venv`，单元文件位于 `/etc/systemd/system/ota-server.service`。
 部署脚本可重复运行，成功后自动启动服务并设置开机启动。
 
+## 更新已安装的服务代码
+
+从发布机执行，可传 SSH 配置别名。脚本按目标机的 `WorkingDirectory` 定位安装目录，
+可用第二个参数核对目录。
+
+```bash
+./update_server.sh ota-backup
+./update_server.sh ota-primary /root/server/ota_server
+```
+
+目标机需已用 `deploy.sh` 安装并配置为运行 `ota_server:app`，SSH 用户需为 root 或可使用非交互 sudo。
+脚本通过 rsync 上传 `ota_server.py` 和 `ota_reports.py`，使用现有虚拟环境检查能否导入，
+替换文件后重启 `ota-server.service` 并检查 `/ota/check`。启动或检查失败时会恢复上一份代码并尝试重启。
+多台机器逐台执行。自定义监听端口时，可在发布机设置 `OTA_UPDATE_PORT`。
+完整安装、依赖或 systemd 配置更新继续使用 `deploy.sh`，设备代码包和资源使用各自的发布脚本。
+
 ## 管理与验证
 
 ```bash
@@ -54,28 +70,107 @@ sudo systemctl daemon-reload
 sudo systemctl restart ota-server
 ```
 
-## 资源清单与代码版本分离
+## 发布资源（`publish_resources.py`）
 
-`ota/version.json` 保存代码版本、代码包信息及资源地址。每个资源版本在自己的目录下提供
-`manifest.json`。资源新增、修改、删除时，在发布机递增独立资源版本并重新生成清单：
+在发布机的 OTA 仓库根目录执行。发布机和目标机需要 Python 3.11+ 和 rsync。发布账号需能通过
+SSH 登录并写入目标 OTA 根目录。目标机需已有可访问的 OTA 服务，普通资源发布还需要已有代码发布元数据 `ota/version.json`。
+
+### 1. 准备资源清单
+
+`--source` 指向包含 `manifest.json` 的资源根目录。清单中的 `version` 是资源版本，
+脚本会用它命名服务端的资源快照。如果已有确认过的清单，可以直接使用。资源有变动时，
+在只包含正式素材的目录中生成新清单，并递增资源版本。
 
 ```bash
 python3 ota/generate.py /path/to/resources 1.3.5
 # 已预置签名密钥的设备需要签名清单：
 # python3 ota/generate.py /path/to/resources 1.3.5 --sign-key-file /path/to/ota_sign.key
-python3 publish_resources.py --source /path/to/resources --config ../mindora/deploy/online.json
 ```
 
-发布机和目标机需要 Python 3.11+ 和 rsync，SSH 目标复用代码发布配置中的 `ssh_host`、
-`remote_root` 和 `public_base_url`。目标机应已有代码发布元数据和可访问的 OTA 服务。
-脚本只同步清单列出的文件，验证文件大小和哈希后发布到 `ota/resource-releases/<资源版本>/`。
-首版可从旧 `ota/resources/` 在服务端复用未变文件的副本。后续版本从上一版硬链接复用未变文件，
-以 rsync 增量传输新内容。暂存目录和发布目录需在同一文件系统。
+生成器会递归扫描源目录。备份和历史清单应放在源目录之外。向多台镜像发布时使用同一份清单。
+发布过的资源版本要求清单字节一致，重试时沿用原清单。
 
-脚本验证公开资源清单后，与代码发布共用 `.publish.lock` 原子更新 `ota/version.json` 的资源字段。
-公开检查成功后默认保留最近三版，可用 `--keep` 增加保留数，为长时间离线或续传的设备延长窗口。
-现有旧版固定资源目录继续提供下载，已发布资源版本的文件需保持原样。
+### 2. 配置目标服务器
+
+`--config` 可以复用代码发布的 JSON。单台服务器配置如下。
+
+```json
+{
+  "ssh_host": "ota-primary",
+  "remote_root": "/root/server/ota_server",
+  "public_base_url": "https://ota.example.com/ota"
+}
+```
+
+| 字段 | 用途 |
+| --- | --- |
+| `ssh_host` | SSH 主机或配置别名，也接受 `user@host`。填写 `localhost` 时在当前机器发布。 |
+| `remote_root` | 目标机的 OTA 安装根目录，与该机器的 `INSTALL_DIR` 一致。 |
+| `public_base_url` | 以 `/ota` 结尾的 HTTP(S) 地址，目标机自身也必须能访问它以完成发布校验。 |
+
+要用同一份 `online.json` 发布到多台机器，在其中添加 `servers` 数组，把所有目标依次列入，
+例如先备用机，再主机。
+
+```json
+{
+  "servers": [
+    {
+      "ssh_host": "ota-backup",
+      "remote_root": "/srv/ota",
+      "public_base_url": "https://ota-backup.example.com/ota"
+    },
+    {
+      "ssh_host": "ota-primary",
+      "remote_root": "/root/server/ota_server",
+      "public_base_url": "https://ota-primary.example.com/ota"
+    }
+  ]
+}
+```
+
+如果代码发布也使用这份 JSON，保留原有顶层字段。资源脚本在存在 `servers` 时按数组发布，
+代码发布脚本仍读取原有顶层字段。
+
+### 3. 发布并检查
+
+例如，使用相邻 `../resources` 中已确认的清单，发布到 `online.json` 指定的目标。
+
+```bash
+python3 publish_resources.py \
+  --source ../resources \
+  --config ../mindora/deploy/online.json
+```
+
+脚本只同步清单列出的文件。首次可在服务端从旧 `ota/resources/` 复制未变文件，后续从上一版通过
+硬链接复用未变文件。暂存目录和发布目录需在同一文件系统。
+
+脚本核对文件大小和哈希，发布到 `ota/resource-releases/<资源版本>/`，再验证公开清单，
+使用与代码发布共用的 `.publish.lock` 原子记录最新资源。线上代码没有绑定资源版本时，
+这些最新资源会成为对外下载地址。线上代码通过 `resources_version` 绑定了特定版本时，继续使用绑定资源，
+该资源目录即使超出保留数量也会保留。
+成功输出包含 `resources_url`、`resources_manifest_url` 和 `resources_manifest_sha256`，
+并已通过公开 `/ota/check` 校验。若提示 `Resource metadata committed`，说明指针已切换，
+可先查询目标的 `/ota/check` 确认状态。
+多台机器按配置顺序逐台发布并独立切换。一台失败时脚本继续处理后续目标，最后列出失败目标并返回非零状态。
+
+公开检查通过后，默认保留最近 3 个资源快照。发布较频繁时可加 `--keep 5` 等参数延长旧版本的下载窗口。
+历史固定路径 `ota/resources/` 继续供已拿到旧 URL 的设备访问。资源发布无需重启 OTA 服务。
 发布单独的资源版本时，客户端的升级触发条件仍由设备上的代码版本逻辑决定。
+
+### 为新代码预传绑定资源
+
+代码发布包的 `version.json` 可设置 `"resources_version": "1.3.4"`。先在每个代码发布目标准备这份资源。
+使用 `--stage-only` 时，脚本上传并校验快照，现有公开资源地址和最新资源记录继续沿用。
+
+```bash
+python3 publish_resources.py \
+  --source ../resources \
+  --config ../mindora/deploy/online.json \
+  --stage-only
+```
+
+后续运行代码发布脚本，它会验证绑定清单，把代码版本和资源地址一起写入 `ota/version.json`。
+没有设置绑定的代码包继续使用目标机的最新资源。
 
 ## OTA 设备日志
 

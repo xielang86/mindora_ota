@@ -100,8 +100,9 @@ def published_releases(directory):
     )
 
 
-def prepare(ota, stage):
-    read_version_metadata(ota / 'version.json')
+def prepare(ota, stage, stage_only=False):
+    if not stage_only:
+        read_version_metadata(ota / 'version.json')
     releases = ota / RELEASES
     releases.mkdir(exist_ok=True)
     if releases.is_symlink() or stage.parent.is_symlink():
@@ -130,10 +131,12 @@ def publish(root, ota, stage, job):
         'resources_manifest_url': resources_url + '/manifest.json',
         'resources_manifest_sha256': checksum,
     }
+    stage_only = job.get('stage_only', False)
     with (root / '.publish.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         metadata = ota / 'version.json'
-        current = read_version_metadata(metadata)
+        if not stage_only:
+            current = read_version_metadata(metadata)
         history = root / '.resource-history'
         history.mkdir(exist_ok=True)
         release_hash = history / (version + '.sha256')
@@ -150,24 +153,33 @@ def publish(root, ota, stage, job):
         with urlopen(patch['resources_manifest_url'], timeout=20) as response:
             if hashlib.sha256(response.read()).hexdigest() != checksum:
                 raise ValueError('Public manifest does not match the release')
-        current.update(patch)
+        if stage_only:
+            if stage.exists():
+                shutil.rmtree(stage)
+            return {**patch, 'stage_only': True}
+
+        pinned = current.get('resources_version')
+        current['latest_resources'] = patch
+        if not pinned:
+            current.update(patch)
         atomic_write(metadata, (json.dumps(current, ensure_ascii=False, indent=2) + '\n').encode())
 
         try:
             check = Request(base + '/check', data=b'{}', headers={'Content-Type': 'application/json'})
             with urlopen(check, timeout=20) as response:
                 offered = json.load(response)
-            if any(offered.get(key) != value for key, value in patch.items()):
+            expected = {key: current.get(key) for key in (*patch, 'latest_resources', 'resources_version')}
+            if any(offered.get(key) != value for key, value in expected.items()):
                 raise ValueError('Public /ota/check has different resource metadata')
             atomic_write(snapshot / '.published', b'')
             for old in published_releases(releases)[job['keep']:]:
-                if old != snapshot:
+                if old != snapshot and old.name != pinned:
                     shutil.rmtree(old)
             if stage.exists():
                 shutil.rmtree(stage)
         except (OSError, ValueError, AttributeError) as exc:
             raise ValueError(f'Resource metadata committed; verification or cleanup failed: {exc}') from exc
-    return patch
+    return {**patch, 'active': not pinned or pinned == version}
 
 
 def worker(action, job):
@@ -175,7 +187,7 @@ def worker(action, job):
     ota = (root / 'ota').resolve(strict=True)
     stage = root / '.resource-incoming' / job['stage_id']
     if action == 'prepare':
-        return prepare(ota, stage)
+        return prepare(ota, stage, job.get('stage_only', False))
     return publish(root, ota, stage, job)
 
 
@@ -188,26 +200,52 @@ def run_worker(host, action, job):
     return json.loads(result.stdout)
 
 
-def run(args):
-    source = args.source.resolve(strict=True)
-    version, checksum, files = read_manifest(source)
-    config = json.loads(args.config.read_text())
-    host = config['ssh_host']
+def read_target(config):
+    if not isinstance(config, dict):
+        raise ValueError('Each server must be a JSON object')
+    host = config.get('ssh_host')
+    if not isinstance(host, str):
+        raise ValueError('ssh_host is required')
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*(?:@[A-Za-z0-9_][A-Za-z0-9_.-]*)?|::1', host):
         raise ValueError('Invalid SSH host; use an SSH config alias for advanced options')
-    remote_root = config['remote_root']
-    if not re.fullmatch(r'/[A-Za-z0-9_./-]+', remote_root) or '..' in Path(remote_root).parts:
+    remote_root = config.get('remote_root')
+    if (not isinstance(remote_root, str) or not re.fullmatch(r'/[A-Za-z0-9_./-]+', remote_root)
+            or '..' in Path(remote_root).parts):
         raise ValueError('remote_root must be an absolute path without spaces or ..')
-    public_base = config['public_base_url'].rstrip('/')
+    public_base = config.get('public_base_url')
+    if not isinstance(public_base, str):
+        raise ValueError('public_base_url is required')
+    public_base = public_base.rstrip('/')
     parsed = urlsplit(public_base)
     if (parsed.scheme not in ('http', 'https') or not parsed.hostname
             or parsed.query or parsed.fragment or not parsed.path.endswith('/ota')):
         raise ValueError('public_base_url must be an HTTP(S) URL ending in /ota')
+    return host, str(Path(remote_root)), public_base
 
-    job = {
-        'remote_root': remote_root, 'public_base_url': public_base, 'stage_id': uuid4().hex,
-        'version': version, 'sha256': checksum, 'keep': args.keep,
-    }
+
+def read_targets(path):
+    config = json.loads(path.read_text())
+    if not isinstance(config, dict):
+        raise ValueError('Deployment configuration must be a JSON object')
+    servers = config.get('servers', [config])
+    if not isinstance(servers, list) or not servers:
+        raise ValueError('servers must be a non-empty list')
+    targets = []
+    seen = set()
+    for index, entry in enumerate(servers, start=1):
+        try:
+            host, root, public_base = read_target(entry)
+            key = (host, root)
+            if key in seen:
+                raise ValueError(f'Duplicate target: {host}:{root}')
+        except ValueError as exc:
+            raise ValueError(f'Server {index}: {exc}') from exc
+        seen.add(key)
+        targets.append((host, root, public_base))
+    return targets
+
+
+def publish_target(host, source, paths, job):
     setup = run_worker(host, 'prepare', job)
     target = setup['stage'] + '/'
     if host not in ('localhost', '127.0.0.1', '::1'):
@@ -217,10 +255,33 @@ def run(args):
     if setup.get('basis'):
         command.append(f"--{setup['basis_mode']}-dest={setup['basis']}")
     command.extend(['--', str(source) + '/', target])
-    paths = b''.join(os.fsencode(name) + b'\0' for name in ('manifest.json', *files))
-    print(f'Publishing resource {version} ({len(files)} files), staging at {setup["stage"]}', flush=True)
+    print(f'Staging at {setup["stage"]}', flush=True)
     subprocess.run(command, input=paths, check=True)
-    print(json.dumps(run_worker(host, 'publish', job), indent=2))
+    return run_worker(host, 'publish', job)
+
+
+def run(args):
+    targets = read_targets(args.config)
+    source = args.source.resolve(strict=True)
+    version, checksum, files = read_manifest(source)
+    paths = b''.join(os.fsencode(name) + b'\0' for name in ('manifest.json', *files))
+    failures = []
+    for index, (host, remote_root, public_base) in enumerate(targets, start=1):
+        target = f'{host}:{remote_root}'
+        job = {
+            'remote_root': remote_root, 'public_base_url': public_base, 'stage_id': uuid4().hex,
+            'version': version, 'sha256': checksum, 'keep': args.keep, 'stage_only': args.stage_only,
+        }
+        print(f'[{index}/{len(targets)}] Publishing resource {version} ({len(files)} files) to {target}', flush=True)
+        try:
+            print(json.dumps(publish_target(host, source, paths, job), indent=2), flush=True)
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            failures.append(target)
+            print(f'Failed on {target}: {exc}', file=sys.stderr, flush=True)
+    if failures:
+        raise ValueError(f'{len(targets) - len(failures)}/{len(targets)} targets verified; failed: {", ".join(failures)}')
+    if len(targets) > 1:
+        print(f'Resource {version} verified on all {len(targets)} servers.')
 
 
 def main():
@@ -229,8 +290,10 @@ def main():
         return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True, help='Resource tree containing manifest.json')
-    parser.add_argument('--config', type=Path, required=True, help='OTA deployment configuration JSON')
+    parser.add_argument('--config', type=Path, required=True, help='OTA deployment JSON with one target or a servers list')
     parser.add_argument('--keep', type=int, default=3, help='Number of published snapshots to retain (default: 3)')
+    parser.add_argument('--stage-only', action='store_true',
+                        help='Upload and verify the snapshot without changing advertised resource pointers')
     args = parser.parse_args()
     if args.keep < 3:
         parser.error('--keep must be at least 3')
